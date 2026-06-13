@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "912619948364",
+    "project_id": "surveillancesystem-65d84",
+    "storage_bucket": "surveillancesystem-65d84.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:912619948364:android:f6ac5aba148871f83ca7e9",
+        "android_client_info": {
+          "package_name": "com.broadcaster"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBzCfwLG5Js1QtuK0wPvP8ZbjgIffp3U8c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
