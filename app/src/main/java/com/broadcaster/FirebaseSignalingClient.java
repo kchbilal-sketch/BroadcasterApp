@@ -1,243 +1,181 @@
 package com.broadcaster;
 
 import android.util.Log;
-import androidx.annotation.NonNull;
+
 import com.google.firebase.database.DataSnapshot;
 import com.google.firebase.database.DatabaseError;
 import com.google.firebase.database.DatabaseReference;
 import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.database.ValueEventListener;
+import com.google.gson.Gson;
+
 import org.webrtc.IceCandidate;
 import org.webrtc.SessionDescription;
+
 import java.util.HashMap;
 import java.util.Map;
 
 public class FirebaseSignalingClient {
     private static final String TAG = "FirebaseSignaling";
+    private static final String SIGNALING_PATH = "signaling";
     
-    private DatabaseReference databaseRef;
+    private DatabaseReference databaseReference;
     private String deviceId;
-    private DatabaseReference deviceRef;
-    private DatabaseReference offerRef;
-    private DatabaseReference answerRef;
-    private DatabaseReference iceCandidatesRef;
+    private SignalingListener listener;
+    private ValueEventListener signalingListener;
+    private Gson gson;
     
-    // Listeners
-    private OnViewerConnectedListener viewerConnectedListener;
-    private OnViewerDisconnectedListener viewerDisconnectedListener;
-    private OnOfferReceivedListener offerReceivedListener;
-    private OnIceCandidateReceivedListener iceCandidateReceivedListener;
-    
-    // Value event listeners for cleanup
-    private ValueEventListener viewerConnectionListener;
-    private ValueEventListener offerListener;
-    private ValueEventListener answerListener;
-    private ValueEventListener iceCandidatesListener;
-    
-    // WebRTC objects (set by BackgroundService)
-    private org.webrtc.PeerConnection peerConnection;
-    
-    public interface OnViewerConnectedListener {
-        void onViewerConnected();
-    }
-    
-    public interface OnViewerDisconnectedListener {
-        void onViewerDisconnected();
-    }
-    
-    public interface OnOfferReceivedListener {
+    public interface SignalingListener {
         void onOfferReceived(SessionDescription offer);
-    }
-    
-    public interface OnIceCandidateReceivedListener {
+        void onAnswerReceived(SessionDescription answer);
         void onIceCandidateReceived(IceCandidate candidate);
+        void onHangUp();
     }
     
+    // Constructor - no arguments as required by the error
     public FirebaseSignalingClient() {
-        FirebaseDatabase database = FirebaseDatabase.getInstance();
-        databaseRef = database.getReference();
+        this.databaseReference = FirebaseDatabase.getInstance().getReference();
+        this.gson = new Gson();
+        this.deviceId = null;
     }
     
-    // Set PeerConnection reference (called from BackgroundService)
-    public void setPeerConnection(org.webrtc.PeerConnection peerConnection) {
-        this.peerConnection = peerConnection;
-    }
-    
-    public void registerBroadcaster(String deviceId) {
+    // Set device ID after construction if needed
+    public void setDeviceId(String deviceId) {
         this.deviceId = deviceId;
-        deviceRef = databaseRef.child("broadcasters").child(deviceId);
-        offerRef = databaseRef.child("offers").child(deviceId);
-        answerRef = databaseRef.child("answers").child(deviceId);
-        iceCandidatesRef = databaseRef.child("iceCandidates").child(deviceId);
-        
-        // Register device
-        Map<String, Object> deviceInfo = new HashMap<>();
-        deviceInfo.put("deviceId", deviceId);
-        deviceInfo.put("status", "online");
-        deviceInfo.put("timestamp", System.currentTimeMillis());
-        deviceRef.setValue(deviceInfo);
-        
-        // Setup all listeners
-        setupViewerConnectionListener();
-        setupAnswerListener();
-        setupIceCandidateListener();
-        
-        Log.d(TAG, "Device registered: " + deviceId);
     }
     
-    private void setupViewerConnectionListener() {
-        viewerConnectionListener = new ValueEventListener() {
-            @Override
-            public void onDataChange(@NonNull DataSnapshot snapshot) {
-                Boolean isConnected = snapshot.getValue(Boolean.class);
-                if (isConnected != null && isConnected) {
-                    Log.d(TAG, "Viewer connected");
-                    if (viewerConnectedListener != null) {
-                        viewerConnectedListener.onViewerConnected();
-                    }
-                } else {
-                    Log.d(TAG, "Viewer disconnected");
-                    if (viewerDisconnectedListener != null) {
-                        viewerDisconnectedListener.onViewerDisconnected();
-                    }
-                }
-            }
-            
-            @Override
-            public void onCancelled(@NonNull DatabaseError error) {
-                Log.e(TAG, "Viewer connection listener cancelled: " + error.getMessage());
-            }
-        };
-        
-        databaseRef.child("viewers").child(deviceId).child("connected")
-            .addValueEventListener(viewerConnectionListener);
+    public void setListener(SignalingListener listener) {
+        this.listener = listener;
     }
     
-    private void setupAnswerListener() {
-        answerListener = new ValueEventListener() {
-            @Override
-            public void onDataChange(@NonNull DataSnapshot snapshot) {
-                String answerSdp = snapshot.getValue(String.class);
-                if (answerSdp != null && peerConnection != null && !answerSdp.isEmpty()) {
-                    Log.d(TAG, "Received answer from viewer");
-                    SessionDescription answer = new SessionDescription(
-                        SessionDescription.Type.ANSWER, 
-                        answerSdp
-                    );
-                    peerConnection.setRemoteDescription(new SimpleSdpObserver(), answer);
-                    // Remove answer after processing
-                    answerRef.removeValue();
-                }
-            }
-            
-            @Override
-            public void onCancelled(@NonNull DatabaseError error) {
-                Log.e(TAG, "Answer listener cancelled: " + error.getMessage());
-            }
-        };
+    public void listenForSignals() {
+        if (deviceId == null) {
+            Log.e(TAG, "Device ID not set. Call setDeviceId() first.");
+            return;
+        }
         
-        answerRef.addValueEventListener(answerListener);
-    }
-    
-    private void setupIceCandidateListener() {
-        iceCandidatesListener = new ValueEventListener() {
+        DatabaseReference signalsRef = databaseReference.child(SIGNALING_PATH).child(deviceId);
+        
+        signalingListener = new ValueEventListener() {
             @Override
-            public void onDataChange(@NonNull DataSnapshot snapshot) {
-                for (DataSnapshot candidateSnapshot : snapshot.getChildren()) {
-                    String candidateStr = candidateSnapshot.getValue(String.class);
-                    if (candidateStr != null && peerConnection != null) {
-                        // Parse ICE candidate (simple format: "sdpMid,sdpMLineIndex,sdp")
-                        String[] parts = candidateStr.split(",", 3);
-                        if (parts.length == 3) {
-                            IceCandidate candidate = new IceCandidate(
-                                parts[0],           // sdpMid
-                                Integer.parseInt(parts[1]), // sdpMLineIndex
-                                parts[2]            // sdp
-                            );
-                            peerConnection.addIceCandidate(candidate);
-                            Log.d(TAG, "ICE candidate added");
+            public void onDataChange(DataSnapshot dataSnapshot) {
+                for (DataSnapshot signalSnapshot : dataSnapshot.getChildren()) {
+                    String type = signalSnapshot.child("type").getValue(String.class);
+                    String data = signalSnapshot.child("data").getValue(String.class);
+                    
+                    if (type == null || data == null) continue;
+                    
+                    Log.d(TAG, "Received signal type: " + type);
+                    
+                    try {
+                        switch (type) {
+                            case "offer":
+                                SessionDescription offer = new SessionDescription(
+                                    SessionDescription.Type.OFFER,
+                                    data
+                                );
+                                if (listener != null) {
+                                    listener.onOfferReceived(offer);
+                                }
+                                break;
+                                
+                            case "answer":
+                                SessionDescription answer = new SessionDescription(
+                                    SessionDescription.Type.ANSWER,
+                                    data
+                                );
+                                if (listener != null) {
+                                    listener.onAnswerReceived(answer);
+                                }
+                                break;
+                                
+                            case "ice":
+                                IceCandidate candidate = gson.fromJson(data, IceCandidate.class);
+                                if (listener != null) {
+                                    listener.onIceCandidateReceived(candidate);
+                                }
+                                break;
+                                
+                            case "hangup":
+                                if (listener != null) {
+                                    listener.onHangUp();
+                                }
+                                break;
                         }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error processing signal: " + e.getMessage());
                     }
-                    // Remove processed candidate
-                    candidateSnapshot.getRef().removeValue();
+                    
+                    // Remove processed signal
+                    signalSnapshot.getRef().removeValue();
                 }
             }
             
             @Override
-            public void onCancelled(@NonNull DatabaseError error) {
-                Log.e(TAG, "ICE candidate listener cancelled: " + error.getMessage());
+            public void onCancelled(DatabaseError databaseError) {
+                Log.e(TAG, "Signaling listener cancelled: " + databaseError.getMessage());
             }
         };
         
-        iceCandidatesRef.addValueEventListener(iceCandidatesListener);
+        signalsRef.addValueEventListener(signalingListener);
+        Log.d(TAG, "Listening for signals on device: " + deviceId);
     }
     
     public void sendOffer(SessionDescription offer) {
-        if (offer != null && offer.description != null) {
-            offerRef.setValue(offer.description);
-            Log.d(TAG, "Offer sent to Firebase");
+        if (deviceId == null) {
+            Log.e(TAG, "Device ID not set. Call setDeviceId() first.");
+            return;
         }
+        sendSignal("offer", offer.description);
+    }
+    
+    public void sendAnswer(SessionDescription answer) {
+        if (deviceId == null) {
+            Log.e(TAG, "Device ID not set. Call setDeviceId() first.");
+            return;
+        }
+        sendSignal("answer", answer.description);
     }
     
     public void sendIceCandidate(IceCandidate candidate) {
-        if (candidate != null) {
-            // Store candidate as string: "sdpMid,sdpMLineIndex,sdp"
-            String candidateStr = candidate.sdpMid + "," + candidate.sdpMLineIndex + "," + candidate.sdp;
-            iceCandidatesRef.push().setValue(candidateStr);
-            Log.d(TAG, "ICE candidate sent to Firebase");
+        if (deviceId == null) {
+            Log.e(TAG, "Device ID not set. Call setDeviceId() first.");
+            return;
         }
+        String iceData = gson.toJson(candidate);
+        sendSignal("ice", iceData);
     }
     
-    public void unregisterBroadcaster() {
-        // Remove all listeners
-        if (viewerConnectionListener != null) {
-            databaseRef.child("viewers").child(deviceId).child("connected")
-                .removeEventListener(viewerConnectionListener);
+    public void sendHangUp() {
+        if (deviceId == null) {
+            Log.e(TAG, "Device ID not set. Call setDeviceId() first.");
+            return;
         }
-        if (answerListener != null) {
-            answerRef.removeEventListener(answerListener);
-        }
-        if (iceCandidatesListener != null) {
-            iceCandidatesRef.removeEventListener(iceCandidatesListener);
-        }
+        sendSignal("hangup", "");
+    }
+    
+    private void sendSignal(String type, String data) {
+        DatabaseReference signalsRef = databaseReference.child(SIGNALING_PATH).child(deviceId);
+        String key = signalsRef.push().getKey();
         
-        // Remove device from Firebase
-        if (deviceRef != null) {
-            deviceRef.removeValue();
+        if (key != null) {
+            Map<String, Object> signal = new HashMap<>();
+            signal.put("type", type);
+            signal.put("data", data);
+            signal.put("timestamp", System.currentTimeMillis());
+            
+            signalsRef.child(key).setValue(signal)
+                .addOnSuccessListener(aVoid -> Log.d(TAG, "Signal sent: " + type))
+                .addOnFailureListener(e -> Log.e(TAG, "Failed to send signal: " + type, e));
         }
-        
-        // Cleanup signaling paths
-        if (offerRef != null) {
-            offerRef.removeValue();
-        }
-        if (answerRef != null) {
-            answerRef.removeValue();
-        }
-        if (iceCandidatesRef != null) {
-            iceCandidatesRef.removeValue();
-        }
-        
-        Log.d(TAG, "Broadcaster unregistered: " + deviceId);
     }
     
-    // Setter methods for listeners
-    public void setOnViewerConnected(OnViewerConnectedListener listener) {
-        this.viewerConnectedListener = listener;
-    }
-    
-    public void setOnViewerDisconnected(OnViewerDisconnectedListener listener) {
-        this.viewerDisconnectedListener = listener;
-    }
-    
-    public String getDeviceId() {
-        return deviceId;
-    }
-    
-    // Simple SDP Observer
-    private static class SimpleSdpObserver implements org.webrtc.SdpObserver {
-        @Override public void onCreateSuccess(SessionDescription sd) {}
-        @Override public void onSetSuccess() {}
-        @Override public void onCreateFailure(String error) {}
-        @Override public void onSetFailure(String error) {}
+    public void cleanup() {
+        if (signalingListener != null && deviceId != null) {
+            DatabaseReference signalsRef = databaseReference.child(SIGNALING_PATH).child(deviceId);
+            signalsRef.removeEventListener(signalingListener);
+            signalsRef.removeValue();
+        }
+        Log.d(TAG, "Cleanup complete");
     }
 }
