@@ -6,7 +6,6 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraManager;
 import android.media.MediaRecorder;
@@ -69,9 +68,10 @@ public class BackgroundService extends Service {
     }
     
     private void initFirebase() {
-        // FIXED: Renamed method to avoid conflict with parent class
+        // Get unique device ID
         deviceId = getUniqueDeviceId();
         
+        // Register device in Firebase
         deviceRef = FirebaseDatabase.getInstance().getReference("devices").child(deviceId);
         
         Map<String, Object> deviceInfo = new HashMap<>();
@@ -83,7 +83,7 @@ public class BackgroundService extends Service {
         deviceRef.onDisconnect().setValue(null);
     }
     
-    // FIXED: Renamed from getDeviceId() to avoid conflict with parent ContextWrapper method
+    // Get unique device ID - renamed to avoid conflict with parent class
     private String getUniqueDeviceId() {
         String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
         if (androidId == null || androidId.isEmpty()) {
@@ -97,7 +97,11 @@ public class BackgroundService extends Service {
         webRTCManager.setCallback(new WebRTCManager.WebRTCCallback() {
             @Override
             public void onLocalDescription(SessionDescription sdp) {
-                signalingClient.sendOffer(sdp);
+                if (sdp.type == SessionDescription.Type.OFFER) {
+                    signalingClient.sendOffer(sdp);
+                } else if (sdp.type == SessionDescription.Type.ANSWER) {
+                    signalingClient.sendAnswer(sdp);
+                }
             }
             
             @Override
@@ -128,7 +132,9 @@ public class BackgroundService extends Service {
             }
         });
         
-        signalingClient = new FirebaseSignalingClient(deviceId);
+        // Initialize signaling client - using no-argument constructor
+        signalingClient = new FirebaseSignalingClient();
+        signalingClient.setDeviceId(deviceId);
         signalingClient.setListener(new FirebaseSignalingClient.SignalingListener() {
             @Override
             public void onOfferReceived(SessionDescription offer) {
