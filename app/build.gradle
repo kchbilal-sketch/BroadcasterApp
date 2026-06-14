@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace "com.broadcaster"   // ✅ FIX ADDED HERE
+    namespace "com.broadcaster"
 
     compileSdk 34
 
     defaultConfig {
         applicationId "com.broadcaster"
-        minSdk 21
+        minSdk 24
         targetSdk 34
         versionCode 1
         versionName "1.0"
@@ -21,20 +21,30 @@ android {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
         }
+        debug {
+            minifyEnabled false
+        }
     }
 
-    // Required for WebRTC
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
 }
 
+// ✅ ADD THIS - Tells Gradle where to find WebRTC
+repositories {
+    google()
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.10.0'
     implementation 'com.google.firebase:firebase-database:20.3.0'
+    implementation 'com.google.code.gson:gson:2.10.1'
 
-    // WebRTC library
-    implementation 'io.github.webrtc-sdk:android:115.0.0'
+    // WebRTC library - CORRECT VERSION
+    implementation 'io.github.webrtc-sdk:android:137.7151.05'
 }
