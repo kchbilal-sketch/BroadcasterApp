@@ -36,5 +36,5 @@ dependencies {
     implementation 'com.google.firebase:firebase-database:20.3.0'
 
     // WebRTC library
-    implementation 'org.webrtc:google-webrtc:1.0.32009'
+    implementation 'io.github.webrtc-sdk:android:115.0.0'
 }
